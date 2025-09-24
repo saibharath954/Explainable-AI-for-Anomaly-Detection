@@ -1,0 +1,18 @@
+Model Evaluation Report: Isolation Forest (Final)
+==================================================
+
+Performance Metrics:
+--------------------
+threshold: 0.1391
+precision: 0.2483
+recall: 0.3673
+f1: 0.2963
+roc_auc: 0.9543
+average_precision: 0.1429
+
+Confusion Matrix:
+--------------------
+True Negatives: 56755
+False Positives: 109
+False Negatives: 62
+True Positives: 36
