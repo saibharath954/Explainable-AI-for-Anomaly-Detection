@@ -7,6 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import (
+    auc,
     precision_recall_curve,
     average_precision_score,
     roc_auc_score,
@@ -66,18 +67,23 @@ class Evaluator:
         # Get the threshold that yields the best F1
         best_f1_idx = np.argmax(f1_scores)
         self.best_threshold = thresholds[best_f1_idx]
+
+         # Compute AUPRC (area under the PR curve)
+        auprc = auc(recall, precision)
         
         # Get metrics at this best threshold
         self.metrics['best_f1'] = f1_scores[best_f1_idx]
         self.metrics['best_precision'] = precision[best_f1_idx]
         self.metrics['best_recall'] = recall[best_f1_idx]
+        self.metrics['auprc'] = auprc
         self.metrics['best_threshold'] = self.best_threshold
         
         logger.info(f"[{self.model_name}] Best Threshold (via F1): {self.best_threshold:.4f}")
         logger.info(f"[{self.model_name}] Best F1: {self.metrics['best_f1']:.4f}")
         logger.info(f"[{self.model_name}] Best Precision: {self.metrics['best_precision']:.4f}")
         logger.info(f"[{self.model_name}] Best Recall: {self.metrics['best_recall']:.4f}")
-        
+        logger.info(f"[{self.model_name}] AUPRC: {self.metrics['auprc']:.4f}")
+
         return self.metrics
 
     def get_metrics_at_threshold(self, threshold):
