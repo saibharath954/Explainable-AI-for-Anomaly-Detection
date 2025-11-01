@@ -1,96 +1,100 @@
-import numpy as np
-import pandas as pd
-import joblib
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler, RobustScaler
-from sklearn.base import BaseEstimator, TransformerMixin
-from src.config import NUMERIC_FEATURES, CATEGORICAL_FEATURES, MODELS_DIR, RANDOM_STATE
-import logging
+# src/preprocess.py
+"""
+Defines the Preprocessor class for scaling data.
+"""
 
-logging.basicConfig(level=logging.INFO)
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.compose import ColumnTransformer
+import joblib
+import logging
+import config
+
 logger = logging.getLogger(__name__)
 
-class Preprocessor(BaseEstimator, TransformerMixin):
-    def __init__(self, numeric_features, categorical_features, scaling_method='standard', seed=RANDOM_STATE):
-        self.numeric_features = numeric_features
-        self.categorical_features = categorical_features
-        self.scaling_method = scaling_method
-        self.seed = seed
-        
-        # Initialize transformers
-        self.num_imputer = SimpleImputer(strategy='median')
-        
-        if scaling_method == 'standard':
-            self.scaler = StandardScaler()
-        elif scaling_method == 'robust':
-            self.scaler = RobustScaler()
-        else:
-            raise ValueError("scaling_method must be 'standard' or 'robust'")
-        
-        # For categorical features (though creditcard dataset has none)
-        if categorical_features:
-            from sklearn.preprocessing import OrdinalEncoder
-            self.cat_encoder = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-        else:
-            self.cat_encoder = None
-        
-        self.feature_names_out_ = None
+class Preprocessor:
+    """
+    Preprocessor for the XAD framework.
+    Applies StandardScaler to 'Time' and 'Amount' features as per.
+    """
+    def __init__(self, features_to_scale):
+        self.features_to_scale = features_to_scale
+        self.preprocessor = None
+        self.feature_names = None
 
-    def fit(self, df, y=None):
+    def _get_column_transformer(self):
+        """Creates the ColumnTransformer."""
+        # 'passthrough' ensures that all other columns (V1-V28) are kept unchanged
+        return ColumnTransformer(
+            transformers=[
+                ('scaler', StandardScaler(), self.features_to_scale)
+            ],
+            remainder='passthrough'
+        )
+
+    def fit(self, df):
+        """Fits the preprocessor on the training data."""
         logger.info("Fitting preprocessor...")
+        self.preprocessor = self._get_column_transformer()
         
-        # Fit numeric transformers
-        numeric_data = df[self.numeric_features]
-        self.num_imputer.fit(numeric_data)
-        num_imputed = self.num_imputer.transform(numeric_data)
-        self.scaler.fit(num_imputed)
+        # We only fit on the features, not the target
+        X = df.drop(config.TARGET, axis=1, errors='ignore')
+        self.preprocessor.fit(X)
         
-        # Fit categorical transformers if needed
-        if self.categorical_features and self.cat_encoder is not None:
-            categorical_data = df[self.categorical_features].fillna('MISSING')
-            self.cat_encoder.fit(categorical_data)
-        
-        # Set feature names for output
-        self.feature_names_out_ = self.numeric_features.copy()
-        if self.categorical_features:
-            self.feature_names_out_.extend(self.categorical_features)
-        
-        return self
+        # Get feature names in the correct order after transformation
+        self._set_feature_names_out(X)
+        logger.info("Preprocessor fitted.")
 
     def transform(self, df):
-        logger.info("Transforming data...")
+        """Transforms the data using the fitted preprocessor."""
+        if self.preprocessor is None:
+            raise RuntimeError("Preprocessor must be fitted before transforming data.")
         
-        # Transform numeric features
-        numeric_data = df[self.numeric_features]
-        num_imputed = self.num_imputer.transform(numeric_data)
-        num_scaled = self.scaler.transform(num_imputed)
+        X = df.drop(config.TARGET, axis=1, errors='ignore')
+        X_transformed = self.preprocessor.transform(X)
         
-        # Transform categorical features if needed
-        if self.categorical_features and self.cat_encoder is not None:
-            categorical_data = df[self.categorical_features].fillna('MISSING')
-            cat_encoded = self.cat_encoder.transform(categorical_data)
-            X = np.hstack([num_scaled, cat_encoded])
-        else:
-            X = num_scaled
-        
-        return X
+        # Return as a DataFrame to maintain feature names
+        return pd.DataFrame(X_transformed, columns=self.get_feature_names_out(), index=X.index)
 
-    def fit_transform(self, df, y=None):
-        return self.fit(df).transform(df)
+    def fit_transform(self, df):
+        """Fits and transforms the data."""
+        self.fit(df)
+        return self.transform(df)
+
+    def _set_feature_names_out(self, df):
+        """Helper to get the correct order of feature names after transformation."""
+        # Get names of scaled features
+        scaled_feature_names = self.features_to_scale
+        
+        # Get names of passthrough features
+        all_feature_names = df.columns.tolist()
+        passthrough_feature_names = [
+            f for f in all_feature_names if f not in self.features_to_scale
+        ]
+        
+        # The transformer outputs scaled features first, then passthrough features
+        self.feature_names = scaled_feature_names + passthrough_feature_names
 
     def get_feature_names_out(self):
-        if self.feature_names_out_ is None:
-            raise ValueError("Preprocessor has not been fitted yet")
-        return self.feature_names_out_
+        """Returns the list of feature names in the order of the transform."""
+        if self.feature_names is None:
+            raise RuntimeError("Must fit preprocessor to get feature names.")
+        return self.feature_names
 
-    def save(self, filename="preprocessor.joblib"):
-        filepath = MODELS_DIR / filename
-        joblib.dump(self, filepath)
-        logger.info(f"Preprocessor saved to {filepath}")
+    def save(self, path=config.PREPROCESSOR_PATH):
+        """Saves the preprocessor to disk."""
+        joblib.dump(self.preprocessor, path)
+        joblib.dump(self.feature_names, str(path) + "_features")
+        logger.info(f"Preprocessor saved to {path}")
 
     @classmethod
-    def load(cls, filename="preprocessor.joblib"):
-        filepath = MODELS_DIR / filename
-        if not filepath.exists():
-            raise FileNotFoundError(f"Preprocessor not found at {filepath}")
-        return joblib.load(filepath)
+    def load(cls, path=config.PREPROCESSOR_PATH):
+        """Loads the preprocessor from disk."""
+        preprocessor_obj = joblib.load(path)
+        feature_names = joblib.load(str(path) + "_features")
+        
+        instance = cls(features_to_scale=feature_names[:len(config.FEATURES_TO_SCALE)])
+        instance.preprocessor = preprocessor_obj
+        instance.feature_names = feature_names
+        logger.info(f"Preprocessor loaded from {path}")
+        return instance

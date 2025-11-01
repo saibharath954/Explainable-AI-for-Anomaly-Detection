@@ -1,0 +1,11 @@
+--- Final Evaluation Report for Baseline Isolation Forest ---
+
+Threshold (from validation set): -0.0023
+
+--- Test Set Metrics ---
+threshold: -0.0023
+precision: 0.2632
+recall: 0.3061
+f1: 0.2830
+auprc: 0.1522
+roc_auc: 0.9525

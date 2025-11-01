@@ -1,66 +1,65 @@
-import pandas as pd
-import numpy as np
-from pathlib import Path
-from sklearn.model_selection import train_test_split
-from src.config import RAW_DATA_DIR, PROCESSED_DATA_DIR, TEST_SIZE, VALIDATION_SIZE, RANDOM_STATE
-import logging
+# src/data_loader.py
+"""
+Handles loading and splitting the credit card fraud dataset.
+"""
 
-logging.basicConfig(level=logging.INFO)
+import pandas as pd
+from sklearn.model_selection import train_test_split
+import logging
+import config
+
 logger = logging.getLogger(__name__)
 
-def load_creditcard_data(filename="creditcard.csv"):
-    """Load the credit card fraud detection dataset"""
-    filepath = RAW_DATA_DIR / filename
-    
-    if not filepath.exists():
-        raise FileNotFoundError(
-            f"Dataset not found at {filepath}. "
-            f"Please download it from https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud "
-            f"and place it in the {RAW_DATA_DIR} directory."
-        )
-    
-    logger.info(f"Loading dataset from {filepath}")
-    df = pd.read_csv(filepath)
-    logger.info(f"Dataset shape: {df.shape}")
-    logger.info(f"Fraud percentage: {df['Class'].mean() * 100:.4f}%")
-    
-    return df
+def load_creditcard_data(path=config.CREDIT_CARD_DATASET):
+    """Loads the dataset from the specified path."""
+    logger.info(f"Loading dataset from {path}")
+    try:
+        df = pd.read_csv(path)
+        logger.info(f"Dataset shape: {df.shape}")
+        fraud_perc = 100 * df[config.TARGET].mean()
+        logger.info(f"Fraud percentage: {fraud_perc:.4f}%")
+        return df
+    except FileNotFoundError:
+        logger.error(f"Dataset file not found at {path}")
+        return None
 
-def split_data(df, test_size=TEST_SIZE, validation_size=VALIDATION_SIZE, random_state=RANDOM_STATE):
-    """Split data into train, validation, and test sets"""
-    # First split: separate test set
+def split_data(df, test_size=0.2, val_size=0.1):
+    """
+    Splits the data into train, validation, and test sets.
+    The split is stratified by the target variable.
+    """
+    if df is None:
+        return None, None, None
+    
+    # First split: Train + Val vs Test
     train_val_df, test_df = train_test_split(
-        df, test_size=test_size, random_state=random_state, stratify=df['Class']
+        df, 
+        test_size=test_size, 
+        random_state=42, 
+        stratify=df[config.TARGET]
     )
     
-    # Second split: separate validation from train
+    # Second split: Train vs Val
+    # Val size is relative to the original full dataset,
+    # so we adjust the test_size for the second split.
+    val_test_size = val_size / (1.0 - test_size)
     train_df, val_df = train_test_split(
-        train_val_df, 
-        test_size=validation_size/(1-test_size), 
-        random_state=random_state, 
-        stratify=train_val_df['Class']
+        train_val_df,
+        test_size=val_test_size,
+        random_state=42,
+        stratify=train_val_df[config.TARGET]
     )
     
-    logger.info(f"Train shape: {train_df.shape}, Fraud: {train_df['Class'].mean() * 100:.4f}%")
-    logger.info(f"Validation shape: {val_df.shape}, Fraud: {val_df['Class'].mean() * 100:.4f}%")
-    logger.info(f"Test shape: {test_df.shape}, Fraud: {test_df['Class'].mean() * 100:.4f}%")
+    logger.info(f"Train shape: {train_df.shape}, Fraud: {100*train_df[config.TARGET].mean():.4f}%")
+    logger.info(f"Validation shape: {val_df.shape}, Fraud: {100*val_df[config.TARGET].mean():.4f}%")
+    logger.info(f"Test shape: {test_df.shape}, Fraud: {100*test_df[config.TARGET].mean():.4f}%")
     
     return train_df, val_df, test_df
 
 def save_processed_data(train_df, val_df, test_df):
-    """Save processed data to disk"""
-    train_df.to_csv(PROCESSED_DATA_DIR / "train.csv", index=False)
-    val_df.to_csv(PROCESSED_DATA_DIR / "validation.csv", index=False)
-    test_df.to_csv(PROCESSED_DATA_DIR / "test.csv", index=False)
-    logger.info(f"Processed data saved to {PROCESSED_DATA_DIR}")
-
-def load_processed_data():
-    """Load processed data from disk"""
-    train_df = pd.read_csv(PROCESSED_DATA_DIR / "train.csv")
-    val_df = pd.read_csv(PROCESSED_DATA_DIR / "validation.csv")
-    test_df = pd.read_csv(PROCESSED_DATA_DIR / "test.csv")
-    
-    logger.info(f"Loaded processed data: "
-                f"Train={train_df.shape}, Validation={val_df.shape}, Test={test_df.shape}")
-    
-    return train_df, val_df, test_df
+    """Saves the split data to the processed data directory."""
+    config.PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    train_df.to_csv(config.TRAIN_DATA, index=False)
+    val_df.to_csv(config.VAL_DATA, index=False)
+    test_df.to_csv(config.TEST_DATA, index=False)
+    logger.info(f"Processed data saved to {config.PROCESSED_DATA_DIR}")

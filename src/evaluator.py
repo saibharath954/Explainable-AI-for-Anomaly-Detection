@@ -1,161 +1,160 @@
+# src/evaluator.py
+"""
+Defines the Evaluator class for assessing model performance.
+"""
+
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import (
-    precision_recall_curve, average_precision_score, f1_score, 
-    precision_score, recall_score, roc_auc_score, confusion_matrix,
-    classification_report, roc_curve, PrecisionRecallDisplay
+    precision_recall_curve,
+    average_precision_score,
+    roc_auc_score,
+    roc_curve,
+    confusion_matrix,
+    precision_score,
+    recall_score,
+    f1_score
 )
 import logging
+import config
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class Evaluator:
-    def __init__(self, y_true, scores, model_name="Isolation Forest"):
+    """
+    Handles evaluation of the anomaly detection model.
+    
+    CRITICAL: It assumes y_scores are raw scores from Isolation Forest,
+    where LOW scores mean ANOMALOUS. It inverts them internally
+    (anomaly_scores = -y_scores) so HIGH scores mean ANOMALOUS,
+    which is what scikit-learn's metrics functions expect.
+    """
+    def __init__(self, y_true, y_scores, model_name="Model"):
         self.y_true = y_true
-        self.scores = scores
+        self.y_scores = y_scores
         self.model_name = model_name
+        
+        # --- CRITICAL FIX ---
+        # Invert scores:
+        # IF raw scores: low = anomaly
+        # We need: high = anomaly
+        self.anomaly_scores = -self.y_scores
+        # --- END FIX ---
+        
+        self.best_threshold = 0.0
         self.metrics = {}
+
+    def calculate_auprc(self):
+        """Calculates the Area Under the Precision-Recall Curve (AUPRC)."""
+        auprc = average_precision_score(self.y_true, self.anomaly_scores)
+        self.metrics['auprc'] = auprc
+        return auprc
+
+    def find_best_threshold(self):
+        """
+        Finds the best threshold from the P-R curve that maximizes the F1 score.
+        """
+        precision, recall, thresholds = precision_recall_curve(
+            self.y_true, self.anomaly_scores
+        )
         
-    def calculate_metrics(self, threshold=None):
-        """Calculate various evaluation metrics"""
-        if threshold is None:
-            # Find optimal threshold using precision-recall curve
-            precision, recall, thresholds = precision_recall_curve(self.y_true, self.scores)
-            f1_scores = 2 * (precision * recall) / (precision + recall + 1e-9)
-            best_idx = np.argmax(f1_scores)
-            threshold = thresholds[best_idx]
+        # Calculate F1 score for each threshold
+        # Add a small epsilon to avoid division by zero
+        f1_scores = (2 * precision * recall) / (precision + recall + 1e-9)
         
-        y_pred = (self.scores >= threshold).astype(int)
+        # Get the threshold that yields the best F1
+        best_f1_idx = np.argmax(f1_scores)
+        self.best_threshold = thresholds[best_f1_idx]
         
-        self.metrics = {
-            'threshold': threshold,
-            'precision': precision_score(self.y_true, y_pred, zero_division=0),
-            'recall': recall_score(self.y_true, y_pred, zero_division=0),
-            'f1': f1_score(self.y_true, y_pred, zero_division=0),
-            'roc_auc': roc_auc_score(self.y_true, self.scores),
-            'average_precision': average_precision_score(self.y_true, self.scores),
-            'confusion_matrix': confusion_matrix(self.y_true, y_pred)
-        }
+        # Get metrics at this best threshold
+        self.metrics['best_f1'] = f1_scores[best_f1_idx]
+        self.metrics['best_precision'] = precision[best_f1_idx]
+        self.metrics['best_recall'] = recall[best_f1_idx]
+        self.metrics['best_threshold'] = self.best_threshold
         
-        logger.info(f"Evaluation metrics at threshold {threshold:.4f}:")
-        for metric, value in self.metrics.items():
-            if metric != 'confusion_matrix':
-                logger.info(f"  {metric}: {value:.4f}")
+        logger.info(f"[{self.model_name}] Best Threshold (via F1): {self.best_threshold:.4f}")
+        logger.info(f"[{self.model_name}] Best F1: {self.metrics['best_f1']:.4f}")
+        logger.info(f"[{self.model_name}] Best Precision: {self.metrics['best_precision']:.4f}")
+        logger.info(f"[{self.model_name}] Best Recall: {self.metrics['best_recall']:.4f}")
         
         return self.metrics
-    
+
+    def get_metrics_at_threshold(self, threshold):
+        """
+        Calculates P, R, and F1 at a specific, given threshold.
+        """
+        y_pred = (self.anomaly_scores > threshold).astype(int)
+        
+        precision = precision_score(self.y_true, y_pred)
+        recall = recall_score(self.y_true, y_pred)
+        f1 = f1_score(self.y_true, y_pred)
+        auprc = average_precision_score(self.y_true, self.anomaly_scores)
+        roc_auc = roc_auc_score(self.y_true, self.anomaly_scores)
+        
+        metrics = {
+            'threshold': threshold,
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'auprc': auprc,
+            'roc_auc': roc_auc
+        }
+        
+        logger.info(f"[{self.model_name}] Metrics at threshold {threshold:.4f}:")
+        for key, val in metrics.items():
+            logger.info(f"  {key}: {val:.4f}")
+            
+        return metrics, y_pred
+
     def plot_precision_recall_curve(self, save_path=None):
-        """Plot precision-recall curve"""
-        precision, recall, _ = precision_recall_curve(self.y_true, self.scores)
-        avg_precision = average_precision_score(self.y_true, self.scores)
-        
-        plt.figure(figsize=(10, 8))
-        display = PrecisionRecallDisplay(precision=precision, recall=recall, 
-                                        average_precision=avg_precision)
-        display.plot()
-        plt.title(f'Precision-Recall Curve ({self.model_name})\nAP={avg_precision:.4f}')
-        plt.grid(True)
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            logger.info(f"Precision-recall curve saved to {save_path}")
-        
-        return plt.gcf()
-    
-    def plot_roc_curve(self, save_path=None):
-        """Plot ROC curve"""
-        fpr, tpr, _ = roc_curve(self.y_true, self.scores)
-        roc_auc = roc_auc_score(self.y_true, self.scores)
-        
-        plt.figure(figsize=(10, 8))
-        plt.plot(fpr, tpr, color='darkorange', lw=2, 
-                label=f'ROC curve (AUC = {roc_auc:.4f})')
-        plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-        plt.xlim([0.0, 1.0])
-        plt.ylim([0.0, 1.05])
-        plt.xlabel('False Positive Rate')
-        plt.ylabel('True Positive Rate')
-        plt.title(f'ROC Curve ({self.model_name})')
-        plt.legend(loc="lower right")
-        plt.grid(True)
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            logger.info(f"ROC curve saved to {save_path}")
-        
-        return plt.gcf()
-    
-    def plot_confusion_matrix(self, threshold=None, save_path=None):
-        """Plot confusion matrix"""
-        if threshold is None:
-            threshold = self.metrics.get('threshold', 
-                                       np.percentile(self.scores, 95))
-        
-        y_pred = (self.scores >= threshold).astype(int)
-        cm = confusion_matrix(self.y_true, y_pred)
+        """Plots the Precision-Recall curve."""
+        precision, recall, _ = precision_recall_curve(self.y_true, self.anomaly_scores)
+        auprc = self.metrics.get('auprc', self.calculate_auprc())
         
         plt.figure(figsize=(8, 6))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                   xticklabels=['Normal', 'Fraud'],
-                   yticklabels=['Normal', 'Fraud'])
-        plt.xlabel('Predicted')
-        plt.ylabel('Actual')
-        plt.title(f'Confusion Matrix (Threshold = {threshold:.4f})')
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            logger.info(f"Confusion matrix saved to {save_path}")
-        
-        return plt.gcf()
-    
-    def plot_score_distribution(self, save_path=None):
-        """Plot distribution of anomaly scores"""
-        plt.figure(figsize=(10, 6))
-        
-        # Plot scores for each class
-        for label, name in [(0, 'Normal'), (1, 'Fraud')]:
-            mask = self.y_true == label
-            sns.histplot(self.scores[mask], label=name, alpha=0.7, kde=True)
-        
-        plt.xlabel('Anomaly Score')
-        plt.ylabel('Density')
-        plt.title('Distribution of Anomaly Scores by Class')
-        plt.legend()
+        plt.plot(recall, precision, label=f'{self.model_name} (AUPRC = {auprc:.4f})')
+        plt.xlabel('Recall')
+        plt.ylabel('Precision')
+        plt.title('Precision-Recall Curve')
+        plt.legend(loc='best')
         plt.grid(True)
         
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            logger.info(f"Score distribution plot saved to {save_path}")
+            plt.savefig(save_path)
+            logger.info(f"Precision-recall curve saved to {save_path}")
+        plt.close()
+
+    def plot_roc_curve(self, save_path=None):
+        """Plots the ROC curve."""
+        fpr, tpr, _ = roc_curve(self.y_true, self.anomaly_scores)
+        roc_auc = roc_auc_score(self.y_true, self.anomaly_scores)
         
-        return plt.gcf()
-    
-    def generate_report(self, save_path=None):
-        """Generate comprehensive evaluation report"""
-        report = f"Model Evaluation Report: {self.model_name}\n"
-        report += "=" * 50 + "\n\n"
-        
-        # Add metrics
-        report += "Performance Metrics:\n"
-        report += "-" * 20 + "\n"
-        for metric, value in self.metrics.items():
-            if metric != 'confusion_matrix':
-                report += f"{metric}: {value:.4f}\n"
-        
-        # Add confusion matrix
-        report += "\nConfusion Matrix:\n"
-        report += "-" * 20 + "\n"
-        cm = self.metrics['confusion_matrix']
-        report += f"True Negatives: {cm[0, 0]}\n"
-        report += f"False Positives: {cm[0, 1]}\n"
-        report += f"False Negatives: {cm[1, 0]}\n"
-        report += f"True Positives: {cm[1, 1]}\n"
+        plt.figure(figsize=(8, 6))
+        plt.plot(fpr, tpr, label=f'{self.model_name} (ROC AUC = {roc_auc:.4f})')
+        plt.plot([0, 1], [0, 1], 'k--')
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('ROC Curve')
+        plt.legend(loc='best')
+        plt.grid(True)
         
         if save_path:
-            with open(save_path, 'w') as f:
-                f.write(report)
-            logger.info(f"Evaluation report saved to {save_path}")
+            plt.savefig(save_path)
+            logger.info(f"ROC curve saved to {save_path}")
+        plt.close()
+
+    def plot_confusion_matrix(self, y_pred, save_path=None):
+        """Plots the confusion matrix."""
+        cm = confusion_matrix(self.y_true, y_pred)
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                    xticklabels=['Normal', 'Fraud'], yticklabels=['Normal', 'Fraud'])
+        plt.title('Confusion Matrix')
+        plt.xlabel('Predicted Label')
+        plt.ylabel('True Label')
         
-        return report
+        if save_path:
+            plt.savefig(save_path)
+            logger.info(f"Confusion matrix saved to {save_path}")
+        plt.close()
