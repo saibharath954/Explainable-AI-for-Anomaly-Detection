@@ -17,26 +17,51 @@ class AutoencoderDetector:
     """
     Wrapper for an Autoencoder anomaly detection model.
     """
-    def __init__(self, input_dim, encoding_dim=14, **params):
+    def __init__(self, input_dim, **params):
         self.input_dim = input_dim
-        self.encoding_dim = encoding_dim
         self.params = params
+        
+        # Get layer structure from params.
+        # Default to the *original* structure [14, 7] if not provided
+        # (e.g., this handles the case when loading a model)
+        self.layers = self.params.get('layers', [14, 7])
+        
+        if 'layers' not in self.params:
+            logger.warning(
+                f"Autoencoder 'layers' not specified in params. "
+                f"Defaulting to {self.layers}. (This is normal during model load)."
+            )
+            
         self.model = self._build_model()
-        logger.info(f"Autoencoder detector initialized with input_dim={input_dim}, encoding_dim={encoding_dim}")
+        logger.info(f"Autoencoder detector initialized with input_dim={input_dim}, layers={self.layers}")
 
     def _build_model(self):
-        """Builds the Keras Autoencoder model."""
+        """
+        Builds the Keras Autoencoder model dynamically based on self.layers.
+        Uses 'relu' for hidden layers for better deep network training.
+        """
         input_layer = Input(shape=(self.input_dim, ))
         
-        # Encoder
-        encoder = Dense(self.encoding_dim, activation="tanh")(input_layer)
-        encoder = Dense(int(self.encoding_dim / 2), activation="relu")(encoder)
+        x = input_layer
         
-        # Decoder
-        decoder = Dense(self.encoding_dim, activation='tanh')(encoder)
-        decoder = Dense(self.input_dim, activation='linear')(decoder)
+        # --- Encoder ---
+        # Build encoder layers (e.g., [20, 10, 5])
+        for layer_dim in self.layers:
+            x = Dense(layer_dim, activation="relu")(x)
         
-        autoencoder = Model(inputs=input_layer, outputs=decoder)
+        # 'x' is now the bottleneck layer
+        
+        # --- Decoder ---
+        # Build decoder layers in reverse (e.g., [10, 20])
+        # We reverse all layers *except* the last one (the bottleneck)
+        for layer_dim in reversed(self.layers[:-1]):
+            x = Dense(layer_dim, activation="relu")(x)
+        
+        # --- Output Layer ---
+        # Reconstruct back to the original input_dim
+        output_layer = Dense(self.input_dim, activation='linear')(x) 
+        
+        autoencoder = Model(inputs=input_layer, outputs=output_layer)
         autoencoder.compile(optimizer='adam', loss='mean_squared_error')
         return autoencoder
 
@@ -103,11 +128,19 @@ class AutoencoderDetector:
     def load(cls, path=config.DETECTOR_PATH):
         """Loads the Keras model from disk."""
         logger.info(f"Loading detector from {path}")
-        loaded_model = load_model(path)
+        # We need to pass custom_objects=None if we don't have custom layers/losses
+        # but the default load_model should be fine here.
+        loaded_model = load_model(path) 
         
         # Re-create an instance to hold the model
         # input_dim will be inferred from the loaded model
         input_dim = loaded_model.layers[0].input_shape[1]
-        instance = cls(input_dim=input_dim)
+        
+        # This will call __init__ with an empty params dict,
+        # which will use the default [14, 7] layers to build a
+        # temporary model. This is fine.
+        instance = cls(input_dim=input_dim) 
+        
+        # We immediately replace the temporary model with the loaded one.
         instance.model = loaded_model
         return instance

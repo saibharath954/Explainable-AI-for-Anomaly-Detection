@@ -45,9 +45,11 @@ FEATURES_TO_SCALE = ['Time', 'Amount']
 # --- Model Parameters ---
 
 # *** NEW: Autoencoder parameters ***
+# We now define the encoder layer structure dynamically.
+# The decoder will be built symmetrically.
 AUTOENCODER_PARAMS = {
-    'encoding_dim': 14,  # Intermediate dimension
-    'epochs': 20,        # Increase this for better performance (e.g., 50)
+    'layers': [20, 10, 5],  # Your requested 30 -> 20 -> 10 -> 5 bottleneck
+    'epochs': 50,          # Increased from 20 for the deeper model
     'batch_size': 256
 }
 
