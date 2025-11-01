@@ -1,4 +1,7 @@
 # config.py
+"""
+Configuration file for the Explainable Anomaly Detection (XAD) project.
+"""
 
 from pathlib import Path
 import os
@@ -13,8 +16,6 @@ REPORTS_DIR = BASE_DIR / "reports"
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-# ... (keep all other paths the same) ...
-# Original dataset file
 CREDIT_CARD_DATASET = RAW_DATA_DIR / "creditcard.csv"
 
 # Processed data files
@@ -22,38 +23,11 @@ TRAIN_DATA = PROCESSED_DATA_DIR / "train.csv"
 VAL_DATA = PROCESSED_DATA_DIR / "val.csv"
 TEST_DATA = PROCESSED_DATA_DIR / "test.csv"
 
-# --- Data and Feature Settings ---
-TARGET = 'Class'
-FEATURES_TO_SCALE = ['Time', 'Amount']
-
-# --- Model Parameters ---
-
-# NEW: Grid for hyperparameter tuning
-# We will test all combinations of these values.
-HYPERPARAM_GRID = {
-    'n_estimators': [100, 200, 300],
-    'max_samples': [256, 'auto']
-}
-
-# Base contamination
-BASE_CONTAMINATION = 0.00172
-BASE_RANDOM_STATE = 42
-
-# CTGAN parameters
-CTGAN_PARAMS = {
-    'epochs': 300,
-    'batch_size': 50,
-    'verbose': True
-}
-
-# --- SHAP Explainer Settings ---
-N_EXPLANATIONS = 5
-
 # Model artifact paths
+# *** UPDATED: New path for the Autoencoder model ***
 PREPROCESSOR_PATH = MODELS_DIR / "preprocessor.joblib"
-DETECTOR_PATH = MODELS_DIR / "isolation_forest.joblib"
+DETECTOR_PATH = MODELS_DIR / "autoencoder_detector.h5" # Keras models use .h5
 EXPLAINER_PATH = MODELS_DIR / "shap_explainer.joblib"
-CTGAN_PATH = MODELS_DIR / "ctgan_model.pkl"
 
 # Report and figure paths
 EVALUATION_REPORT = REPORTS_DIR / "evaluation_report.txt"
@@ -66,28 +40,17 @@ SHAP_SUMMARY_PLOT = REPORTS_DIR / "shap_summary.png"
 
 # --- Data and Feature Settings ---
 TARGET = 'Class'
-# As per the paper[cite: 77], V1-V28 are PCA features.
-# 'Time' and 'Amount' are the raw features needing scaling.
 FEATURES_TO_SCALE = ['Time', 'Amount']
 
 # --- Model Parameters ---
 
-# Isolation Forest parameters
-# The contamination is set to the known fraud rate in the dataset [cite: 77, 95]
-ISOLATION_FOREST_PARAMS = {
-    'n_estimators': 100,
-    'contamination': 0.00172, # From paper [cite: 95]
-    'max_samples': 'auto',
-    'n_jobs': -1,
-    'random_state': 42
-}
-
-# CTGAN parameters [cite: 66]
-CTGAN_PARAMS = {
-    'epochs': 300,
-    'batch_size': 50,
-    'verbose': True
+# *** NEW: Autoencoder parameters ***
+AUTOENCODER_PARAMS = {
+    'encoding_dim': 14,  # Intermediate dimension
+    'epochs': 20,        # Increase this for better performance (e.g., 50)
+    'batch_size': 256
 }
 
 # --- SHAP Explainer Settings ---
-N_EXPLANATIONS = 5 # Number of anomalies to explain
+N_EXPLANATIONS = 5
+N_SHAP_BACKGROUND = 100  # Number of samples for SHAP background

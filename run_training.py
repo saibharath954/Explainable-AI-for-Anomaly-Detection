@@ -2,7 +2,7 @@
 # run_training.py
 """
 Main training pipeline for the Explainable Anomaly Detection (XAD) framework.
-Includes hyperparameter tuning.
+Uses an Autoencoder detection engine.
 """
 
 import os, sys
@@ -10,7 +10,7 @@ from pathlib import Path
 import logging
 import numpy as np
 import pandas as pd
-from itertools import product # Import product for grid search
+import tensorflow as tf
 
 # Force base directory to project root
 BASE_DIR = Path(__file__).resolve().parent
@@ -25,29 +25,30 @@ sys.path.append(str(SRC_DIR))
 import config
 from data_loader import load_creditcard_data, split_data, save_processed_data
 from preprocess import Preprocessor
-from detector import IsfDetector
+from detector import AutoencoderDetector # *** UPDATED ***
 from explainer import SHAPExplainer
-from generator import FraudCTGAN
 from evaluator import Evaluator
 
+# Set random seed for reproducibility
+np.random.seed(42)
+tf.random.set_seed(42)
+
 # --- Set up logging ---
-# (logging setup is the same)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("training.log", mode='w'),
+        logging.FileHandler("training_autoencoder.log", mode='w'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
 def main():
-    logger.info("--- Starting XAD Training Pipeline (with Hyperparameter Tuning) ---")
+    logger.info("--- Starting XAD Training Pipeline (Autoencoder) ---")
 
     # === STEP 1: LOAD AND SPLIT DATA ===
     logger.info("--- STEP 1: Loading and Splitting Data ---")
-    # (This section is unchanged)
     df = load_creditcard_data()
     if df is None:
         logger.error("Failed to load data. Exiting.")
@@ -62,179 +63,61 @@ def main():
 
     # === STEP 2: PREPROCESS DATA ===
     logger.info("--- STEP 2: Preprocessing Data ---")
-    # (This section is unchanged)
     preprocessor = Preprocessor(features_to_scale=config.FEATURES_TO_SCALE)
     
-    X_train = preprocessor.fit_transform(train_df)
-    X_val = preprocessor.transform(val_df)
-    X_test = preprocessor.transform(test_df)
+    # Fit on training data
+    X_train_df = preprocessor.fit_transform(train_df)
+    # Transform validation and test data
+    X_val_df = preprocessor.transform(val_df)
+    X_test_df = preprocessor.transform(test_df)
     
     preprocessor.save()
     feature_names = preprocessor.get_feature_names_out()
+    input_dim = len(feature_names)
 
-    # === STEP 3: HYPERPARAMETER TUNING FOR BASELINE DETECTOR ===
-    logger.info("--- STEP 3: Hyperparameter Tuning for Baseline Detector ---")
+    # *** CRITICAL: Train Autoencoder ONLY on NORMAL data ***
+    # This is the correct methodology for this type of anomaly detection.
+    X_train_normal = X_train_df[y_train == 0].values
+    X_val_normal = X_val_df[y_val == 0].values
     
-    best_detector = None
-    best_val_metrics = None
-    best_auprc = -1.0 # We want to maximize AUPRC
-    best_params = {}
-
-    # Create all combinations of parameters
-    param_keys = config.HYPERPARAM_GRID.keys()
-    param_values = config.HYPERPARAM_GRID.values()
-    param_combinations = [dict(zip(param_keys, v)) for v in product(*param_values)]
-
-    logger.info(f"Starting grid search with {len(param_combinations)} combinations...")
-
-    for params in param_combinations:
-        # Add the fixed parameters
-        params['contamination'] = config.BASE_CONTAMINATION
-        params['random_state'] = config.BASE_RANDOM_STATE
-        params['n_jobs'] = -1
-        
-        logger.info(f"Testing params: {params}")
-        
-        # Train the detector
-        detector = IsfDetector(**params)
-        detector.fit(X_train)
-        
-        # Evaluate on validation set
-        val_scores = detector.get_scores(X_val)
-        evaluator = Evaluator(y_val, val_scores, f"IF {params['n_estimators']}-{params['max_samples']}")
-        
-        # Find best metrics
-        val_metrics = evaluator.find_best_threshold()
-        current_auprc = val_metrics['auprc']
-        logger.info(f"Validation AUPRC: {current_auprc:.4f}, F1: {val_metrics['best_f1']:.4f}")
-
-        # Check if this model is the best one so far
-        if current_auprc > best_auprc:
-            best_auprc = current_auprc
-            best_detector = detector
-            best_val_metrics = val_metrics
-            best_params = params
-            logger.info(f"*** New best model found with AUPRC: {best_auprc:.4f} ***")
-
-    logger.info("--- Grid Search Complete ---")
-    logger.info(f"Best params: {best_params}")
-    logger.info(f"Best validation AUPRC: {best_val_metrics['auprc']:.4f}")
-    logger.info(f"Best validation F1: {best_val_metrics['best_f1']:.4f}")
+    # Convert test sets to numpy for faster processing
+    X_test = X_test_df.values
     
-    # Use the best model from the grid search
-    detector_base = best_detector
-    val_metrics_base = best_val_metrics
-    baseline_threshold = val_metrics_base['best_threshold']
-    baseline_f1 = val_metrics_base['best_f1']
-    
-    detector_base.save(config.MODELS_DIR / "isolation_forest_base.joblib")
+    logger.info(f"Training normal data shape: {X_train_normal.shape}")
+    logger.info(f"Validation normal data shape: {X_val_normal.shape}")
 
-
-    # === STEP 4: GENERATE SHAP EXPLANATIONS (from BEST baseline) ===
-    logger.info("--- STEP 4: Generating SHAP Explanations ---")
-    # (This section is unchanged, it will now use the *best* detector)
-    explainer = SHAPExplainer(detector_base, feature_names)
+    # === STEP 3: TRAIN DETECTOR ===
+    logger.info("--- STEP 3: Training Autoencoder Detector ---")
+    detector = AutoencoderDetector(
+        input_dim=input_dim, 
+        **config.AUTOENCODER_PARAMS
+    )
     
-    val_scores_base = detector_base.get_scores(X_val)
-    val_anomaly_scores = -val_scores_base
-    anomaly_indices = np.where(val_anomaly_scores > baseline_threshold)[0]
-    
-    if len(anomaly_indices) > 0:
-        n_explain = min(config.N_EXPLANATIONS, len(anomaly_indices))
-        logger.info(f"Generating explanations for top {n_explain} anomalies...")
-        
-        anomalies_to_explain_df = X_val.iloc[anomaly_indices[:n_explain]]
-        shap_values = explainer.explain_batch(anomalies_to_explain_df)
-        
-        for i in range(n_explain):
-            instance_values = anomalies_to_explain_df.iloc[i].values
-            explanation = explainer.generate_natural_language_explanation(
-                shap_values[i], instance_values
-            )
-            logger.info(f"Explanation for Anomaly {i+1}:\n{explanation}")
-        
-        all_shap_values = explainer.explain_batch(X_val)
-        explainer.summary_plot(all_shap_values, X_val, save_path=config.SHAP_SUMMARY_PLOT)
-        
-    explainer.save()
+    # Fit on normal data
+    detector.fit(X_train_normal, X_val_normal)
+    detector.save()
 
-    # === STEP 5: TRAIN & EVALUATE AUGMENTED DETECTOR ===
-    logger.info("--- STEP 5: Training and Evaluating Augmented Detector (CTGAN) ---")
-    # (This section is unchanged, but we'll use the *best* params for the augmented model)
+    # === STEP 4: EVALUATE ON VALIDATION SET (to find threshold) ===
+    logger.info("--- STEP 4: Evaluating on Validation Set ---")
+    # Get scores for the *full* validation set (normal + anomalies)
+    val_scores = detector.get_scores(X_val_df.values)
     
-    fraud_df = train_df[train_df[config.TARGET] == 1].drop(config.TARGET, axis=1)
-    X_train_fraud = X_train[y_train == 1]
+    # The evaluator will find the best F1-score and threshold
+    evaluator_val = Evaluator(y_val, val_scores, "Autoencoder (Validation)")
+    val_metrics = evaluator_val.find_best_threshold()
+    best_threshold = val_metrics['best_threshold']
     
-    if len(fraud_df) < 10:
-        logger.warning("Not enough fraud samples to train CTGAN. Skipping augmentation.")
-        detector_aug = None
-        augmented_f1 = -1
-    else:
-        # 1. Train CTGAN
-        ctgan = FraudCTGAN(**config.CTGAN_PARAMS)
-        ctgan.fit(fraud_df[feature_names]) 
-        
-        # 2. Generate synthetic samples
-        n_synthetic = len(X_train) - len(X_train_fraud) 
-        synthetic_fraud_df = ctgan.sample(n_synthetic)
-        
-        # 3. Evaluate synthetic data
-        ctgan.evaluate_quality(fraud_df[feature_names], synthetic_fraud_df)
-        ctgan.save()
+    logger.info(f"Best validation F1: {val_metrics['best_f1']:.4f} at threshold {best_threshold:.4f}")
 
-        # 4. Preprocess synthetic data
-        synthetic_fraud_df[config.TARGET] = 1 
-        X_synthetic_fraud = preprocessor.transform(synthetic_fraud_df)
-        
-        # 5. Create augmented training set
-        X_train_aug = pd.concat([X_train, X_synthetic_fraud], ignore_index=True)
-        y_synthetic_fraud = pd.Series([1] * len(X_synthetic_fraud))
-        y_train_aug = pd.concat([y_train, y_synthetic_fraud], ignore_index=True)
-        
-        logger.info(f"Augmented training set: {len(X_train_aug)} samples")
-        
-        # 6. Train augmented detector (using the BEST params from grid search)
-        logger.info(f"Training augmented model with best params: {best_params}")
-        
-        # We must adjust contamination for the new, balanced dataset
-        aug_params = best_params.copy()
-        aug_params['contamination'] = y_train_aug.mean()
-        
-        detector_aug = IsfDetector(**aug_params)
-        detector_aug.fit(X_train_aug)
-        
-        # 7. Evaluate augmented detector on validation set
-        val_scores_aug = detector_aug.get_scores(X_val)
-        evaluator_aug = Evaluator(y_val, val_scores_aug, "Augmented IF")
-        val_metrics_aug = evaluator_aug.find_best_threshold()
-        augmented_f1 = val_metrics_aug['best_f1']
-        
-        detector_aug.save(config.MODELS_DIR / "isolation_forest_augmented.joblib")
-
-    # === STEP 6: FINAL EVALUATION ON TEST SET ===
-    logger.info("--- STEP 6: Final Evaluation on Test Set ---")
-    # (This section is unchanged, it will now compare the *best* baseline vs. augmented)
+    # === STEP 5: FINAL EVALUATION ON TEST SET ===
+    logger.info("--- STEP 5: Final Evaluation on Test Set ---")
     
-    if augmented_f1 > baseline_f1:
-        logger.info("Augmented model performed better on validation set.")
-        final_detector = detector_aug
-        final_threshold = val_metrics_aug['best_threshold']
-        final_model_name = "Augmented Isolation Forest"
-    else:
-        logger.info("Baseline model performed better or augmentation was skipped.")
-        final_detector = detector_base
-        final_threshold = baseline_threshold
-        final_model_name = "Baseline Isolation Forest (Tuned)"
-        
-    logger.info(f"Using model: {final_model_name}")
-    logger.info(f"Using threshold (from validation): {final_threshold:.4f}")
-
     # 1. Get scores on the TEST set
-    test_scores = final_detector.get_scores(X_test)
+    test_scores = detector.get_scores(X_test)
     
-    # 2. Evaluate using the threshold from the validation set
-    test_evaluator = Evaluator(y_test, test_scores, final_model_name)
-    final_metrics, y_pred_test = test_evaluator.get_metrics_at_threshold(final_threshold)
+    # 2. Evaluate using the best_threshold from the validation set
+    test_evaluator = Evaluator(y_test, test_scores, "Autoencoder (Test)")
+    final_metrics, y_pred_test = test_evaluator.get_metrics_at_threshold(best_threshold)
     
     # 3. Generate final plots
     test_evaluator.plot_precision_recall_curve(save_path=config.PR_CURVE_PLOT)
@@ -243,15 +126,65 @@ def main():
     
     # 4. Generate report
     with open(config.EVALUATION_REPORT, 'w') as f:
-        f.write(f"--- Final Evaluation Report for {final_model_name} ---\n\n")
-        f.write(f"Best Params (from grid search): {best_params}\n")
-        f.write(f"Threshold (from validation set): {final_threshold:.4f}\n\n")
+        f.write("--- Final Evaluation Report for Autoencoder ---\n\n")
+        f.write(f"Threshold (from validation set): {best_threshold:.4f}\n\n")
         f.write("--- Test Set Metrics ---\n")
         for key, val in final_metrics.items():
             f.write(f"{key}: {val:.4f}\n")
             
     logger.info(f"Final evaluation report saved to {config.EVALUATION_REPORT}")
-    logger.info("--- XAD Training Pipeline Completed Successfully ---")
+
+    # === STEP 6: GENERATE SHAP EXPLANATIONS ===
+    logger.info("--- STEP 6: Generating SHAP Explanations ---")
+    
+    # We need a background dataset for the DeepExplainer
+    # Use a sample of the normal training data
+    background_sample_idx = np.random.choice(
+        X_train_normal.shape[0], 
+        config.N_SHAP_BACKGROUND, 
+        replace=False
+    )
+    background_data = X_train_normal[background_sample_idx]
+    
+    explainer = SHAPExplainer(detector, background_data, feature_names)
+    
+    # Find anomalies in the test set
+    anomaly_indices = np.where(y_pred_test == 1)[0]
+    
+    if len(anomaly_indices) > 0:
+        n_explain = min(config.N_EXPLANATIONS, len(anomaly_indices))
+        logger.info(f"Generating explanations for top {n_explain} anomalies...")
+        
+        anomalies_to_explain = X_test[anomaly_indices[:n_explain]]
+        
+        # Explain the anomalies
+        shap_values = explainer.explain_batch(anomalies_to_explain)
+        
+        for i in range(n_explain):
+            instance_values = anomalies_to_explain[i]
+            explanation = explainer.generate_natural_language_explanation(
+                shap_values[i], instance_values
+            )
+            logger.info(f"Explanation for Anomaly {i+1}:\n{explanation}")
+        
+        # Create summary plot based on a sample of the test set
+        test_sample_idx = np.random.choice(
+            X_test.shape[0], 
+            config.N_SHAP_BACKGROUND, 
+            replace=False
+        )
+        test_sample = X_test[test_sample_idx]
+        
+        all_shap_values = explainer.explain_batch(test_sample)
+        explainer.summary_plot(
+            all_shap_values, 
+            pd.DataFrame(test_sample, columns=feature_names), 
+            save_path=config.SHAP_SUMMARY_PLOT
+        )
+        
+    explainer.save()
+
+    logger.info("--- XAD Training Pipeline (Autoencoder) Completed Successfully ---")
 
 
 if __name__ == "__main__":

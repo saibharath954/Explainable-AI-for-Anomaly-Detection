@@ -26,30 +26,31 @@ class Evaluator:
     """
     Handles evaluation of the anomaly detection model.
     
-    CRITICAL: It assumes y_scores are raw scores from Isolation Forest,
-    where LOW scores mean ANOMALOUS. It inverts them internally
-    (anomaly_scores = -y_scores) so HIGH scores mean ANOMALOUS,
-    which is what scikit-learn's metrics functions expect.
+    IMPORTANT:
+    - Isolation Forest gives LOWER scores for anomalies, so we invert them.
+    - Autoencoder gives HIGHER reconstruction errors for anomalies, so we keep them as-is.
     """
-    def __init__(self, y_true, y_scores, model_name="Model"):
+
+    def __init__(self, y_true, y_scores, model_name="Model", invert_scores=False):
         self.y_true = y_true
         self.y_scores = y_scores
         self.model_name = model_name
-        
-        # --- CRITICAL FIX ---
-        # Invert scores:
-        # IF raw scores: low = anomaly
-        # We need: high = anomaly
-        self.anomaly_scores = -self.y_scores
-        # --- END FIX ---
-        
-        self.best_threshold = 0.0
         self.metrics = {}
+        self.best_threshold = 0.0
+
+        # Normalize anomaly score direction
+        if invert_scores:
+            # For models like Isolation Forest (low = anomalous)
+            self.anomaly_scores = -self.y_scores
+        else:
+            # For models like Autoencoder (high = anomalous)
+            self.anomaly_scores = self.y_scores
 
     def calculate_auprc(self):
         """Calculates the Area Under the Precision-Recall Curve (AUPRC)."""
         auprc = average_precision_score(self.y_true, self.anomaly_scores)
         self.metrics['auprc'] = auprc
+        logger.info(f"[{self.model_name}] AUPRC: {auprc:.4f}")
         return auprc
 
     def find_best_threshold(self):
@@ -59,25 +60,26 @@ class Evaluator:
         precision, recall, thresholds = precision_recall_curve(
             self.y_true, self.anomaly_scores
         )
-        
-        # Calculate F1 score for each threshold
-        # Add a small epsilon to avoid division by zero
+
+        # Compute F1 score for each threshold
         f1_scores = (2 * precision * recall) / (precision + recall + 1e-9)
-        
-        # Get the threshold that yields the best F1
+
+        # Find the best threshold index
         best_f1_idx = np.argmax(f1_scores)
         self.best_threshold = thresholds[best_f1_idx]
 
-         # Compute AUPRC (area under the PR curve)
+        # Compute AUPRC as well
         auprc = auc(recall, precision)
-        
-        # Get metrics at this best threshold
-        self.metrics['best_f1'] = f1_scores[best_f1_idx]
-        self.metrics['best_precision'] = precision[best_f1_idx]
-        self.metrics['best_recall'] = recall[best_f1_idx]
-        self.metrics['auprc'] = auprc
-        self.metrics['best_threshold'] = self.best_threshold
-        
+
+        # Store metrics
+        self.metrics.update({
+            'best_f1': f1_scores[best_f1_idx],
+            'best_precision': precision[best_f1_idx],
+            'best_recall': recall[best_f1_idx],
+            'best_threshold': self.best_threshold,
+            'auprc': auprc
+        })
+
         logger.info(f"[{self.model_name}] Best Threshold (via F1): {self.best_threshold:.4f}")
         logger.info(f"[{self.model_name}] Best F1: {self.metrics['best_f1']:.4f}")
         logger.info(f"[{self.model_name}] Best Precision: {self.metrics['best_precision']:.4f}")

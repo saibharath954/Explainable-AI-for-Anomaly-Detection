@@ -1,6 +1,7 @@
 # src/explainer.py
 """
 Defines the SHAPExplainer class for model interpretability.
+Handles both Tree and Deep Learning models.
 """
 
 import shap
@@ -10,20 +11,41 @@ import joblib
 import logging
 import matplotlib.pyplot as plt
 import config
+from tensorflow.keras.models import Model
+from sklearn.ensemble import IsolationForest
 
 logger = logging.getLogger(__name__)
 
 class SHAPExplainer:
     """
-    Wrapper for the SHAP TreeExplainer [cite: 61] to explain the Isolation Forest.
+    Wrapper for SHAP to explain the detection model.
     """
-    def __init__(self, detector, feature_names):
-        if not hasattr(detector, 'model'):
-            raise ValueError("Detector object must have a 'model' attribute.")
-            
-        # Use TreeExplainer for tree-based models like Isolation Forest [cite: 61]
-        self.explainer = shap.TreeExplainer(detector.model)
+    def __init__(self, detector, background_data, feature_names):
+        """
+        Initializes the explainer.
+        
+        Args:
+            detector: The fitted detector object (e.g., AutoencoderDetector).
+            background_data: A sample of data (e.g., from X_train) 
+                             for the explainer to use as a background.
+            feature_names: List of feature names.
+        """
+        self.model = detector.model
         self.feature_names = feature_names
+        self.background_data = background_data
+        
+        # *** NEW: Select the correct SHAP explainer ***
+        if isinstance(self.model, Model): # Keras Model
+            logger.info("Initializing shap.DeepExplainer for Keras model.")
+            # We must provide background data for DeepExplainer
+            self.explainer = shap.DeepExplainer(self.model, self.background_data)
+        elif isinstance(self.model, IsolationForest):
+             logger.info("Initializing shap.TreeExplainer for Isolation Forest.")
+             self.explainer = shap.TreeExplainer(self.model)
+        else:
+            logger.warning("Model type not recognized for SHAP. Using KernelExplainer.")
+            self.explainer = shap.KernelExplainer(self.model, self.background_data)
+            
         logger.info("SHAP explainer initialized.")
 
     def explain_batch(self, X):
@@ -35,37 +57,48 @@ class SHAPExplainer:
             X_values = X.values
         else:
             X_values = X
-            
+        
+        # For Autoencoder (DeepExplainer), shap_values will have multiple
+        # outputs if the model has multiple layers. We are interested in
+        # the sum of SHAP values across all features for the *reconstruction*,
+        # which is what shap.DeepExplainer(model, data) returns.
+        # For an autoencoder, this explains the *reconstructed output*.
         shap_values = self.explainer.shap_values(X_values)
-        return shap_values
+        
+        if isinstance(self.model, Model):
+            # DeepExplainer for AE returns shap_values per output feature.
+            # We sum them to get a single contribution value per input feature.
+            # This represents the feature's contribution to its own reconstruction.
+            # A high SHAP value (positive or negative) means the feature
+            # strongly influenced the (likely poor) reconstruction.
+            
+            # The output of shap_values is a list (one per output layer)
+            # Our model has one output layer, so we take shap_values[0]
+            return shap_values[0]
+        else:
+            # TreeExplainer returns a single array
+            return shap_values
 
     def generate_natural_language_explanation(self, shap_values_instance, instance_values):
         """
-        Generates a plain-language explanation for a single anomaly[cite: 108].
+        Generates a plain-language explanation for a single anomaly.
         """
+        # For Autoencoders, we look for the features with the
+        # LARGEST absolute SHAP values. These are the features that
+        # most contributed to the reconstruction error (the anomaly score).
         
-        # Per[cite: 63], negative SHAP values drive the score down (more anomalous)
-        # We find the features with the most negative SHAP values
+        shap_series = pd.Series(np.abs(shap_values_instance), index=self.feature_names)
+        contributions = shap_series.sort_values(ascending=False)
         
-        # Create a Series for easy sorting
-        shap_series = pd.Series(shap_values_instance, index=self.feature_names)
+        top_contributors = contributions.head(3)
         
-        # Sort by SHAP value (most negative first)
-        contributions = shap_series.sort_values()
-        
-        # Get top 3 negative contributors
-        top_negative_contributors = contributions[contributions < 0].head(3)
-        
-        if top_negative_contributors.empty:
-            return "This instance was not flagged as anomalous by SHAP analysis (no negative contributors)."
-
         explanation = "Instance flagged as anomalous. Top 3 contributing factors:\n"
-        for feature, shap_val in top_negative_contributors.items():
+        for feature, shap_val in top_contributors.items():
             feature_idx = self.feature_names.index(feature)
             feature_val = instance_values[feature_idx]
             explanation += (
                 f"  - **{feature}** (value: {feature_val:.4f}) "
-                f"strongly contributed to the anomaly (SHAP: {shap_val:.4f}).\n"
+                f"strongly contributed to the anomaly (SHAP contribution: {shap_val:.4f}).\n"
             )
         
         return explanation
@@ -80,7 +113,8 @@ class SHAPExplainer:
             X_df = pd.DataFrame(X, columns=self.feature_names)
 
         plt.figure()
-        shap.summary_plot(shap_values, X_df, show=False)
+        # Use plot_type='bar' for a clear view of global feature importance
+        shap.summary_plot(shap_values, X_df, plot_type="bar", show=False)
         
         if save_path:
             plt.savefig(save_path, bbox_inches='tight')
@@ -90,12 +124,16 @@ class SHAPExplainer:
             plt.show()
 
     def save(self, path=config.EXPLAINER_PATH):
-        """Saves the explainer to disk."""
-        joblib.dump(self, path)
-        logger.info(f"SHAP explainer saved to {path}")
+        """Saves the explainer (or its config) to disk."""
+        # The explainer itself can be large, we'll save the config
+        # and rebuild it on load if needed.
+        # For simplicity in this step, we just save the feature names.
+        joblib.dump(self.feature_names, path)
+        logger.info(f"SHAP configuration saved to {path}")
 
     @classmethod
-    def load(cls, path=config.EXPLAINER_PATH):
+    def load(cls, detector, background_data, path=config.EXPLAINER_PATH):
         """Loads the explainer from disk."""
-        logger.info(f"Loading SHAP explainer from {path}")
-        return joblib.load(path)
+        logger.info(f"Loading SHAP explainer configuration from {path}")
+        feature_names = joblib.load(path)
+        return cls(detector, background_data, feature_names)

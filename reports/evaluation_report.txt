@@ -1,12 +1,11 @@
---- Final Evaluation Report for Baseline Isolation Forest (Tuned) ---
+--- Final Evaluation Report for Autoencoder ---
 
-Best Params (from grid search): {'n_estimators': 100, 'max_samples': 256, 'contamination': 0.00172, 'random_state': 42, 'n_jobs': -1}
-Threshold (from validation set): -0.0023
+Threshold (from validation set): 5.0103
 
 --- Test Set Metrics ---
-threshold: -0.0023
-precision: 0.2632
-recall: 0.3061
-f1: 0.2830
-auprc: 0.1522
-roc_auc: 0.9525
+threshold: 5.0103
+precision: 0.2863
+recall: 0.6633
+f1: 0.4000
+auprc: 0.3620
+roc_auc: 0.9564
